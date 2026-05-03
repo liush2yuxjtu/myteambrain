@@ -25,9 +25,23 @@ const HOME = process.env.HOME || (require('os')).homedir();
 const CONFIG_DIR = path.join(HOME, '.myteambrain');
 const KNOWLEDGE_DIR = path.join(CONFIG_DIR, 'knowledge');
 
+// Import git-sync and knowledge-store modules
+const { pull: gitPull, push: gitPush, status: gitStatus } = require('./git-sync.js');
+const { queryKnowledge } = require('./knowledge-store.js');
+
 const commands = {
   init: async () => {
     console.log('Initializing MyTeamBrain knowledge base...');
+
+    // Create project-level config
+    const projectConfig = {
+      version: '0.1.0',
+      initialized: new Date().toISOString(),
+      knowledge_dir: KNOWLEDGE_DIR
+    };
+    const configPath = path.join(process.cwd(), '.myteambrain.json');
+    fs.writeFileSync(configPath, JSON.stringify(projectConfig, null, 2));
+    console.log(`  Created: ${configPath}`);
 
     // Create directories
     for (const dir of [CONFIG_DIR, KNOWLEDGE_DIR, path.join(KNOWLEDGE_DIR, 'daily'), path.join(KNOWLEDGE_DIR, 'experts')]) {
@@ -117,70 +131,47 @@ const commands = {
 
   push: async () => {
     console.log('Pushing knowledge to remote...');
-    try {
-      execSync('git push gitee main 2>/dev/null || git push origin main', { stdio: 'inherit' });
-      execSync('git push github main 2>/dev/null || true', { stdio: 'inherit' });
-      console.log('\nPush complete!');
-    } catch (e) {
-      console.error('Push failed. Make sure you have git remotes configured.');
-    }
+    gitPush();
+    console.log('\nPush complete!');
   },
 
   pull: async () => {
     console.log('Pulling knowledge from remote...');
-    try {
-      execSync('git pull gitee main 2>/dev/null || git pull origin main', { stdio: 'inherit' });
-      console.log('\nPull complete!');
-    } catch (e) {
-      console.error('Pull failed. Make sure you have git remotes configured.');
-    }
+    gitPull();
+    console.log('\nPull complete!');
   },
 
-  query: async (searchText) => {
+  search: async (searchText) => {
     if (!searchText) {
-      console.error('Usage: myteambrain query <search-text>');
+      console.error('Usage: myteambrain search <query>');
       process.exit(1);
     }
 
     console.log(`Searching for: "${searchText}"`);
     console.log('');
 
-    const results = [];
-
-    function searchDir(dir, depth = 0) {
-      if (!fs.existsSync(dir)) return;
-      const files = fs.readdirSync(dir, { withFileTypes: true });
-      for (const file of files) {
-        const fullPath = path.join(dir, file.name);
-        if (file.isDirectory() && depth < 5) {
-          searchDir(fullPath, depth + 1);
-        } else if (file.name.endsWith('.md') || file.name.endsWith('.txt')) {
-          try {
-            const content = fs.readFileSync(fullPath, 'utf8');
-            if (content.toLowerCase().includes(searchText.toLowerCase())) {
-              const lines = content.split('\n');
-              const matchingLine = lines.find(l => l.toLowerCase().includes(searchText.toLowerCase()));
-              results.push({
-                file: fullPath.replace(HOME, '~'),
-                match: matchingLine ? matchingLine.trim().substring(0, 100) : ''
-              });
-            }
-          } catch (e) {
-            // Skip unreadable files
-          }
-        }
-      }
+    // Get current year-month and previous months for broader search
+    const now = new Date();
+    const yearMonths = [];
+    for (let i = 0; i < 3; i++) {
+      const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+      yearMonths.push(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`);
     }
 
-    searchDir(KNOWLEDGE_DIR);
+    const results = [];
+    for (const ym of yearMonths) {
+      const entries = queryKnowledge({ yearMonth: ym, search: searchText, limit: 50 });
+      results.push(...entries.map(e => ({ ...e, yearMonth: ym })));
+      if (results.length >= 100) break;
+    }
 
     if (results.length === 0) {
       console.log('No matches found.');
     } else {
       console.log(`Found ${results.length} match(es):\n`);
       results.forEach((r, i) => {
-        console.log(`${i + 1}. ${r.file}`);
-        console.log(`   ${r.match}`);
+        console.log(`${i + 1}. [${r.yearMonth}] ${r.author} - ${r.content.substring(0, 100)}...`);
+        if (r.tags && r.tags.length) console.log(`   Tags: ${r.tags.join(', ')}`);
         console.log('');
       });
     }
@@ -201,12 +192,12 @@ Commands:
   status            Show knowledge base stats
   push              Push knowledge to remote
   pull              Pull knowledge from remote
-  query <text>      Search local knowledge base
+  search <text>     Search local knowledge base
 
 Example:
   myteambrain init
   myteambrain status
-  myteambrain query "决策"`);
+  myteambrain search "决策"`);
   process.exit(0);
 }
 

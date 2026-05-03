@@ -2,6 +2,7 @@
   "name": "myteambrain",
   "version": "0.1.0",
   "description": "AI Collective Memory for Development Teams",
+  "main": "./cli.js",
   "bin": {
     "myteambrain": "./cli.js"
   },
