@@ -266,10 +266,27 @@ function judgeSession(entry) {
     ? entry.taskDescription.slice(0, 120) + (entry.taskDescription.length > 120 ? '...' : '')
     : 'Session memory entry';
 
+  // Build metrics structure for judge harness
+  const metrics = {
+    completeness: { score: completeness, label: 'completeness' },
+    relevance: { score: relevance, label: 'relevance' },
+    reusability: { score: reusability, label: 'reusability' },
+    clean: { score: clean, label: 'clean' },
+    total_score,
+    min_pass_score: MIN_PASS_SCORE,
+  };
+
+  // Generate run ID and evidence paths for judge harness
+  const runId = `run_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  const evidenceDir = `.judge/${runId}`;
+  const stdoutPath = `${evidenceDir}/stdout.txt`;
+
   return {
     exit_code: pass ? 0 : 1,
     scores,
-    total_score,
+    metrics,
+    evidence_dir: evidenceDir,
+    stdout_path: stdoutPath,
     pass,
     summary,
     reason,
