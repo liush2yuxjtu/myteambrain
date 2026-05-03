@@ -39,22 +39,68 @@ async function extractKnowledge() {
       return;
     }
 
-    const extractionPrompt = `From this session transcript, extract:
-1. Key decisions made
-2. Important learnings or discoveries
-3. Action items or follow-ups
-4. Technical solutions implemented
+    // Extract knowledge directly from transcript without spawning claude process
+    const decisions = [];
+    const learnings = [];
+    const actions = [];
 
-Format as markdown with ## Decisions, ## Learnings, ## Actions sections.
-If nothing notable, respond with "No significant knowledge extracted."
+    // Parse JSONL transcript - each line is a JSON object
+    lines.forEach(line => {
+      if (!line.trim()) return;
+      try {
+        const entry = JSON.parse(line);
+        const text = entry.message?.content?.text || '';
+        if (!text) return;
 
-Transcript:
-${recentLines.slice(-3000)}`;
+        // Extract bullet points and numbered items as candidate knowledge
+        const bulletPoints = text.match(/^[-\*\d]+\.\s*.+$/gm) || [];
+        bulletPoints.forEach(bp => {
+          const clean = bp.replace(/^[-\*\d]+\.\s*/, '').trim();
+          if (clean.length > 10) {
+            if (clean.match(/\b(implement|build|fix|add|create|update|change)\b/i)) {
+              actions.push(clean);
+            } else if (clean.match(/\b(learn|discover|realize|notice)\b/i)) {
+              learnings.push(clean);
+            } else if (clean.match(/\b(decide|decision|agreed|chosen)\b/i)) {
+              decisions.push(clean);
+            }
+          }
+        });
 
-    const result = execSync(`claude -p "${extractionPrompt.replace(/"/g, '\\"')}" 2>/dev/null`, {
-      encoding: 'utf8',
-      timeout: 30000
+        // Extract lines that look like key decisions or learnings
+        const lines2 = text.split('\n');
+        lines2.forEach(l => {
+          const trimmed = l.trim();
+          if (trimmed.length > 20 && trimmed.length < 200) {
+            if (/^(?:Decision|Learning|Action|Insight|Note):/i.test(trimmed)) {
+              const value = trimmed.replace(/^(?:Decision|Learning|Action|Insight|Note):\s*/i, '');
+              if (value.length > 10) {
+                if (/^(?:Decision|Insight)/i.test(trimmed)) decisions.push(value);
+                else if (/^(?:Learning|Note)/i.test(trimmed)) learnings.push(value);
+                else actions.push(value);
+              }
+            }
+          }
+        });
+      } catch (e) {
+        // Skip malformed JSON lines
+      }
     });
+
+    // Format extraction result
+    let result = '';
+    if (decisions.length > 0) {
+      result += '## Decisions\n' + decisions.slice(-5).join('\n- ') + '\n';
+    }
+    if (learnings.length > 0) {
+      result += '## Learnings\n' + learnings.slice(-5).join('\n- ') + '\n';
+    }
+    if (actions.length > 0) {
+      result += '## Actions\n' + actions.slice(-5).join('\n- ') + '\n';
+    }
+    if (!result) {
+      result = 'No significant knowledge extracted.\n';
+    }
 
     if (result && !result.includes('No significant knowledge extracted')) {
       const dailyDir = path.join(KNOWLEDGE_DIR, 'daily');
