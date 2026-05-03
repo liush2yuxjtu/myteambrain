@@ -26,3 +26,25 @@
 - If index is too large(>200 items), squeeze into N experts (each expert has its own index lists and one summary of expert itself and details of raw user input prompt and chat session transcript path ) 
 
 - NEVER work in main branch and ALWAYS use agent teams MORE ACTIVELY
+
+## Sandbox 使用规则
+
+**创建沙箱**: `./scripts/generate-sandbox.sh <sandbox-name>`
+
+**Dogfeed 场景**（自喂测试）:
+1. 创建独立沙箱: `./scripts/generate-sandbox.sh feature-xyz`
+2. 进入沙箱: `cd .claude/worktrees/worktree-feature-xyz`
+3. 实验/开发/测试
+4. 验证通过后提交: `git add . && git commit -m "feat: ..."`
+5. 双重推送: `git push gitee worktree-feature-xyz && git push github worktree-feature-xyz`
+
+**Mock-Multi-Users Canary 场景**:
+- 为每个模拟用户创建独立沙箱: `./scripts/generate-sandbox.sh canary-alice`
+- 多沙箱可独立开发/提交，互不干扰
+- 查看所有沙箱: `git worktree list`
+
+**常用命令**:
+- `git worktree list` — 列出所有沙箱
+- `git worktree remove <path> --force` — 删除沙箱
+
+详见: `docs/features/sandbox-usage-guide.md`
