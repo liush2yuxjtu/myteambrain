@@ -1,45 +1,47 @@
 # End-to-End Flow Testing: MyTeamBrain Hooks
 
+**Updated for commit 0ff00b3 (SessionStart hook fix)**
+
 ## Execution Flow Traced
 
-### Session Start Flow
+### Session Start Flow (session-start-hook.js after fix)
 
 ```
 1. Claude Code starts → SessionStart hook fires
 2. Hook runs: session-start-hook.js
 3. git pull from ~/.myteambrain/knowledge (gitee main or origin main)
 4. Reads last 7 .md files from ~/.myteambrain/knowledge/daily/
-5. Writes to ~/.myteambrain/session-context.md
-6. Prints "Type /query to search"
+5. Outputs JSON to stdout: { hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: ... } }
+6. Claude Code reads stdout and injects additionalContext into session
 ```
 
-**Critical Path Issue**: Claude Code does NOT auto-load `~/.myteambrain/session-context.md`. Claude Code reads context from project-level `.claude/` directory, not from arbitrary external files.
+**FIXED**: Now uses `hookSpecificOutput.additionalContext` mechanism which Claude Code recognizes on SessionStart.
 
-### Session Stop Flow
+### Session Stop Flow (stop-hook.js - STILL BROKEN)
 
 ```
 1. Claude Code stops → Stop hook fires
 2. Hook runs: stop-hook.js
 3. Reads transcript from CLAUDE_TRANSCRIPT env or ~/.claude/transcripts/current.jsonl
 4. Extracts last 100 lines
-5. Calls `claude -p "..."` for extraction (ISSUE: recursive call!)
+5. Calls `claude -p "..."` for extraction (CRITICAL BUG - recursive call!)
 6. Saves to ~/.myteambrain/knowledge/daily/YYYY-MM-DD.md
 7. git add + commit + push to gitee
 ```
 
-**Critical Path Issue**: `claude -p` at line 54 would trigger another Claude session, causing infinite recursion or failure.
+**STILL BROKEN**: Line 54 calls `claude -p` which would spawn another Claude session, causing infinite recursion or failure.
 
 ---
 
-## Potential Failure Points
+## Potential Failure Points (Post-Fix Assessment)
 
-| Step | File | Issue | Severity |
-|------|------|-------|----------|
-| 1 | settings.json | Hook path references `.claude/hooks/` but actual hooks at `hooks/` | CRITICAL |
-| 2 | session-start-hook.js | Claude Code doesn't auto-load external ~/.myteambrain/session-context.md | CRITICAL |
-| 3 | stop-hook.js | Calls `claude -p` recursively → may spawn nested session | HIGH |
-| 4 | setup.js | Config references `injectVia: "env"` but no env injection happens | MEDIUM |
-| 5 | Both hooks | Git remote `gitee` may not be configured in knowledge dir | MEDIUM |
+| Step | File | Issue | Severity | Status |
+|------|------|-------|----------|--------|
+| 1 | settings.json | Hook path references `.claude/hooks/` but actual hooks at `hooks/` | CRITICAL | **FAIL** |
+| 2 | session-start-hook.js | Context injection via hookSpecificOutput | HIGH | **FIXED** |
+| 3 | stop-hook.js | Calls `claude -p` recursively → may spawn nested session | HIGH | **FAIL** |
+| 4 | setup.js | Config references `injectVia: "env"` but no env injection happens | MEDIUM | MEDIUM |
+| 5 | Both hooks | Git remote `gitee` may not be configured | MEDIUM | MEDIUM |
 
 ---
 
@@ -50,20 +52,24 @@
 **settings.json** expects: `{CLAUDE_CWD}/.claude/hooks/session-start-hook.js`
 **Actual location**: `{CLAUDE_CWD}/hooks/session-start-hook.js`
 
-Claude Code will fail to find the hook file because `.claude/hooks/` doesn't exist.
+Claude Code will fail to find the hook file because `.claude/hooks/` doesn't exist. **This was NOT fixed in 0ff00b3.**
 
-### 2. Context Injection Mechanism (CRITICAL - FAIL)
+### 2. Context Injection Mechanism (FIXED in session-start-hook.js)
 
-**session-start-hook.js** writes to: `~/.myteambrain/session-context.md`
+**session-start-hook.js** now outputs JSON to stdout:
+```javascript
+const output = {
+  hookSpecificOutput: {
+    hookEventName: 'SessionStart',
+    additionalContext: contextContent
+  }
+};
+console.log(JSON.stringify(output));
+```
 
-Claude Code does NOT automatically read this file. Claude Code loads context from:
-- Project-level `CLAUDE.md`
-- Project-level `.claude/` directory files
-- Environment variables set in settings
+Claude Code reads this JSON from stdout and injects `additionalContext` into the session. **This is the correct mechanism.**
 
-The hook's comment says "Type /query to search" but Claude Code has no built-in `/query` command. This is a non-functional workflow.
-
-### 3. Recursive Claude Call in Stop Hook (HIGH - FAIL)
+### 3. Recursive Claude Call in Stop Hook (STILL BROKEN)
 
 **stop-hook.js** line 54:
 ```javascript
@@ -74,6 +80,8 @@ This calls `claude -p` which would start another Claude process. If Claude Code'
 - Spawn a nested session that never completes
 - Fail if recursive spawning is blocked
 - Cause unpredictable behavior
+
+**This was NOT addressed in commit 0ff00b3.**
 
 ### 4. Git Configuration
 
@@ -91,7 +99,7 @@ The `gitee` remote must be configured in `~/.myteambrain/knowledge/`. If not, co
 | Component | Status | Reason |
 |-----------|--------|--------|
 | Hook path resolution | **FAIL** | `.claude/hooks/` doesn't exist, should be `hooks/` |
-| Context injection into Claude | **FAIL** | Claude Code doesn't read ~/.myteambrain/session-context.md |
+| Context injection (SessionStart) | **PASS** | hookSpecificOutput mechanism is correct |
 | Session stop extraction | **FAIL** | Recursive `claude -p` call is problematic |
 | Git sync (gitee) | **PASS** (if configured) | Silent fallback with `|| true` |
 | Daily knowledge storage | **PASS** (if reached) | File write logic is correct |
@@ -100,17 +108,14 @@ The `gitee` remote must be configured in `~/.myteambrain/knowledge/`. If not, co
 
 ## Recommendations
 
-1. **Move hooks to `.claude/hooks/`** OR update settings.json to point to `hooks/`
+1. **Fix hook path in settings.json**: Change `.claude/hooks/` to `hooks/`
 
-2. **Inject context via environment or proper mechanism**:
-   - Write to `.claude/context/inject.md` (Claude Code reads `.claude/` recursively)
-   - Or use environment injection via settings.json
-
-3. **Fix recursive call in stop-hook.js**:
+2. **Fix recursive call in stop-hook.js**:
    - Use direct file parsing instead of `claude -p`
    - Or use a lightweight LLM API call instead of spawning Claude CLI
+   - Or spawn `claude -p` in background mode with timeout
 
-4. **Add explicit git remote check** before operations
+3. **Test the full flow end-to-end** once both issues are fixed
 
 ---
 
@@ -122,15 +127,15 @@ The `gitee` remote must be configured in `~/.myteambrain/knowledge/`. If not, co
 | stop-hook.js | YES | `/Users/m1/projects/MyTeamBrain/.claude/worktrees/demo3/hooks/stop-hook.js` |
 | setup.js | YES | `/Users/m1/projects/MyTeamBrain/.claude/worktrees/demo3/scripts/setup.js` |
 | .claude/hooks/ (for settings.json) | **NO** | Actual: `hooks/` not `.claude/hooks/` |
-| ~/.myteambrain/knowledge/ | Unknown | Not in worktree |
 
 ---
 
-## Static Trace Conclusion
+## Static Trace Conclusion (Post-Fix 0ff00b3)
 
-The hooks have the right intent but the implementation has critical structural issues:
-1. Path mismatch between settings.json and actual hook location
-2. Claude Code context injection mechanism doesn't work as implemented
-3. Recursive Claude call in stop hook is dangerous
+**SessionStart hook**: FIXED - hookSpecificOutput mechanism correctly injects context.
 
-**Overall: NOT READY FOR USE** - Critical issues need fixing before functional.
+**Stop hook**: STILL BROKEN - recursive `claude -p` call at line 54.
+
+**Hook path**: STILL BROKEN - settings.json expects `.claude/hooks/` which doesn't exist.
+
+**Overall: PARTIALLY FUNCTIONAL** - SessionStart works, but Stop hook and hook path still need fixing.
