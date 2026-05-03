@@ -1,88 +1,76 @@
 #!/usr/bin/env node
 /**
- * stop-hook.js - Claude Code Session Stop Hook
+ * stop-hook.js - Claude Code Stop Hook Entry Point
  *
- * Triggered when a Claude Code session ends.
- * Extracts knowledge from the session transcript and saves to shared knowledge base.
+ * Registered in settings.json as a "stop" hook.
+ * Invoked by Claude Code when the session ends.
+ *
+ * Usage (Claude Code hook):
+ *   node stop-hook.js
+ *
+ * Environment variables set by Claude Code:
+ *   CLAUDE_SESSION_ID    - unique session identifier
+ *   CLAUDE_TRANSCRIPT    - path to the session transcript (.jsonl)
+ *   HOME                 - home directory
+ *
+ * This script:
+ *   1. Reads CLAUDE_SESSION_ID / CLAUDE_TRANSCRIPT from env
+ *   2. Delegates to ../scripts/stop-hook.js for core logic
+ *
+ * Registration (in .claude/settings.json):
+ *   "hooks": {
+ *     "stop": "node hooks/stop-hook.js"
+ *   }
  */
 
-const { execSync } = require('child_process');
-const fs = require('fs');
+'use strict';
+
+const { spawn } = require('child_process');
 const path = require('path');
+const fs = require('fs');
 
-const HOME = process.env.HOME || (require('os')).homedir();
-const CONFIG_DIR = path.join(HOME, '.myteambrain');
-const KNOWLEDGE_DIR = path.join(CONFIG_DIR, 'knowledge');
+const HOME = process.env.HOME || require('os').homedir();
+const SCRIPTS_DIR = path.join(__dirname, '..', 'scripts');
+const SCRIPT_PATH = path.join(SCRIPTS_DIR, 'stop-hook.js');
 
-function log(message) {
-  const timestamp = new Date().toISOString();
-  console.log(`[stop-hook] ${timestamp}: ${message}`);
+// Ensure scripts/stop-hook.js exists
+if (!fs.existsSync(SCRIPT_PATH)) {
+  console.error('[stop-hook] Error: scripts/stop-hook.js not found');
+  process.exit(1);
 }
 
-async function extractKnowledge() {
-  log('Session ended, extracting knowledge...');
+// Log hook activation
+const sessionId = process.env.CLAUDE_SESSION_ID || 'unknown';
+const transcript = process.env.CLAUDE_TRANSCRIPT || 'unknown';
+console.error(`[stop-hook] Session ending: ${sessionId}`);
+console.error(`[stop-hook] Transcript: ${transcript}`);
 
-  const transcriptPath = process.env.CLAUDE_TRANSCRIPT || path.join(HOME, '.claude', 'transcripts', 'current.jsonl');
+// Delegate to core logic script
+const child = spawn('node', [SCRIPT_PATH, sessionId], {
+  stdio: ['pipe', 'pipe', 'pipe'],
+  env: {
+    ...process.env,
+    CLAUDE_SESSION_ID: sessionId,
+    CLAUDE_TRANSCRIPT: transcript,
+  },
+});
 
-  if (!fs.existsSync(transcriptPath)) {
-    log('No transcript found, skipping extraction');
-    return;
+let stdout = '';
+let stderr = '';
+
+child.stdout.on('data', d => { stdout += d.toString(); });
+child.stderr.on('data', d => { stderr += d.toString(); });
+
+child.on('close', code => {
+  if (code !== 0) {
+    console.error(`[stop-hook] Core script exited with code ${code}`);
+    console.error(stderr.slice(-500));
   }
+  // Hooks should exit cleanly regardless of underlying script outcome
+  process.exit(0);
+});
 
-  try {
-    const content = fs.readFileSync(transcriptPath, 'utf8');
-    const lines = content.split('\n').filter(l => l.trim());
-    const recentLines = lines.slice(-100).join('\n');
-
-    if (!recentLines.trim()) {
-      log('Empty transcript, skipping');
-      return;
-    }
-
-    const extractionPrompt = `From this session transcript, extract:
-1. Key decisions made
-2. Important learnings or discoveries
-3. Action items or follow-ups
-4. Technical solutions implemented
-
-Format as markdown with ## Decisions, ## Learnings, ## Actions sections.
-If nothing notable, respond with "No significant knowledge extracted."
-
-Transcript:
-${recentLines.slice(-3000)}`;
-
-    const result = execSync(`claude -p "${extractionPrompt.replace(/"/g, '\\"')}" 2>/dev/null`, {
-      encoding: 'utf8',
-      timeout: 30000
-    });
-
-    if (result && !result.includes('No significant knowledge extracted')) {
-      const dailyDir = path.join(KNOWLEDGE_DIR, 'daily');
-      if (!fs.existsSync(dailyDir)) {
-        fs.mkdirSync(dailyDir, { recursive: true });
-      }
-
-      const today = new Date().toISOString().split('T')[0];
-      const dailyFile = path.join(dailyDir, `${today}.md`);
-
-      const existing = fs.existsSync(dailyFile) ? fs.readFileSync(dailyFile, 'utf8') : '';
-      const newContent = `\n## ${new Date().toISOString()} Session\n\n${result}\n`;
-
-      fs.writeFileSync(dailyFile, existing + newContent);
-      log(`Knowledge saved to: ${dailyFile}`);
-
-      try {
-        execSync('git add . && git commit -m "Knowledge update" && git push gitee main 2>/dev/null || true', {
-          cwd: KNOWLEDGE_DIR,
-          stdio: 'ignore'
-        });
-      } catch (e) {
-        log('Git push failed (may not be configured)');
-      }
-    }
-  } catch (e) {
-    log(`Extraction failed: ${e.message}`);
-  }
-}
-
-extractKnowledge().catch(e => log(`Error: ${e.message}`));
+child.on('error', err => {
+  console.error(`[stop-hook] Failed to spawn: ${err.message}`);
+  process.exit(0); // Don't block Claude Code exit
+});
