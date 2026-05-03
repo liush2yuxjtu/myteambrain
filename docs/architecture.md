@@ -1,314 +1,150 @@
 # MyTeamBrain Architecture
 
+___
+ ███████╗ ██████╗██╗  ██╗ ██████╗  ██████╗ ███████╗
+██╔════╝██╔════╝██║  ██║██╔═══██╗██╔═══██╗██╔════╝
+███████╗██║     ███████║██║   ██║██║   ██║███████╗
+╚════██║██║     ██╔══██║██║   ██║██║   ██║╚════██║
+███████║╚██████╗██║  ██║╚██████╔╝╚██████╔╝███████║
+╚══════╝ ╚═════╝╚═╝  ╚═╝ ╚═════╝  ╚═════╝ ╚══════╝
+
+## 索引（一句话）
+
+SessionStart hook 注入学到的团队记忆到每个新 session，Stop hook 提炼 session 为知识，git sync 跨成员同步。
+
+---
+
+## Summary
+
+MyTeamBrain 让团队每个人的 AI 同时拥有全团队经验。核心管道：Stop hook 提炼 session 为 JSONL 知识 → git 双端同步 → SessionStart hook BM25 评分注入到新 session。另有 Verifier-Judge 做入库前质量门控。
+
+---
+
+## 1. 系统概览
+
 ```
-    ╔═══════════════════════════════════════════════════════════════════════╗
-    ║                         MyTeamBrain Architecture                     ║
-    ╠═══════════════════════════════════════════════════════════════════════╣
-    ║                                                                        ║
-    ║  Session End Flow          Data Storage           Git Sync             ║
-    ║  ───────────────          ───────────           ────────             ║
-    ║                                                                        ║
-    ║  ┌───────────┐     ┌───────────┐   ┌─────────┐    ┌───────────────┐  ║
-    ║  │ Claude    │────►│ Stop Hook │──►│Verifier │───►│  Knowledge    │  ║
-    ║  │ Code Exit │     │ (extract) │   │ Judge   │    │  Store (JSONL)│  ║
-    ║  └───────────┘     └───────────┘   └────┬────┘    └───────┬───────┘  ║
-    ║                                         │ reject           │          ║
-    ║                                         ▼                  │          ║
-    ║                                  ┌────────────┐           │          ║
-    ║                                  │ Rejected   │           │          ║
-    ║                                  │ Entries    │           │          ║
-    ║                                  └────────────┘           │          ║
-    ║                                                           ▼          ║
-    ║                                              ┌─────────────────────┐ ║
-    ║   ┌───────────┐                              │ Git Sync (gitee +  │ ║
-    ║   │ Claude    │◄─────────────────────────────│ github remotes)     │ ║
-    ║   │ Code      │     Memory Injection        └─────────────────────┘ ║
-    ║   │ Start     │                                                        ║
-    ║   └─────┬─────┘                                                        ║
-    ║         │ Session Start                                                ║
-    ║         ▼                                                              ║
-    ║  ┌────────────────┐   ┌───────────┐   ┌─────────────┐                 ║
-    ║  │ SessionStart   │──►│ Knowledge │◄──│ BM25-lite   │                 ║
-    ║  │ Hook (load)    │   │ Store     │   │ scoring     │                 ║
-    ║  └────────────────┘   └───────────┘   └─────────────┘                 ║
-    ║                                                                        ║
-    ╚═══════════════════════════════════════════════════════════════════════╝
+┌─────────────────────────────────────────────────────────────┐
+│  Alice Session (Day 1)                                       │
+│  ┌──────────┐    ┌──────────┐    ┌──────────┐              │
+│  │  Stop    │───>│  JSONL   │───>│   Git    │              │
+│  │  Hook    │    │  写入     │    │  push    │              │
+│  └──────────┘    └──────────┘    └──────────┘              │
+│       │              │               │                      │
+│       │  提炼 session              gitee+github            │
+│       │  为知识条目                 双端同步               │
+└───────┼──────────────┼───────────────┼──────────────────────┘
+        │              │               │
+        │         ~/.myteambrain/knowledge/
+        │              │               │
+        │              v               │
+        │    ┌─────────────────┐       │
+        │    │  2026-05.jsonl  │<──────┘
+        │    └─────────────────┘
+        │              │
+        │              │  Bob Session (Day 2) 拉取
+        │              v
+        │    ┌──────────────────────────────────┐
+        │    │       SessionStart Hook          │
+        │    │  ┌────────────────────────────┐  │
+        │    │  │ BM25  relevance scoring    │  │
+        │    │  │ cwd + branch + commits     │  │
+        │    │  └────────────────────────────┘  │
+        │    │  ┌────────────────────────────┐  │
+        │    │  │ Top-K 知识条目注入 session │  │
+        │    │  └────────────────────────────┘  │
+        │    └──────────────────────────────────┘
+        │              │
+        │              v
+        │    ┌──────────────────────────────────┐
+        │    │  Bob 的 Claude Code session      │
+        │    │  "已知道：Alice 的 JWT gotcha"  │
+        │    └──────────────────────────────────┘
+        │
+        │  Verifier-Judge (PR 前置门控)
+        v
+┌───────────────────────────────────────────────────────────────┐
+│  知识入库前质量门控                                           │
+│  importance/relevance/novelty 评分                           │
+│  PII/secrets 检测 → approved/rejected                       │
+└───────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
-## Component Overview
+## 2. 核心组件
 
-| Component | File | Type | Description |
-|-----------|------|------|-------------|
-| **Stop Hook** | `hooks/stop-hook.js` | Hook | Entry point; delegates to `scripts/stop-hook.js` |
-| **Stop Hook Core** | `scripts/stop-hook.js` | Hook Logic | Extracts knowledge from transcript on session end |
-| **SessionStart Hook** | `hooks/session-start-hook.js` | Hook | Entry point; delegates to `scripts/session-start-hook.js` |
-| **SessionStart Core** | `scripts/session-start-hook.js` | Hook Logic | Injects memories on session start (BM25 scoring) |
-| **Knowledge Store** | `scripts/knowledge-store.js` | Module | JSONL append-only storage with in-memory index |
-| **Git Sync** | `scripts/git-sync.js` | Module | Team memory sync via gitee + github |
-| **Verifier Judge** | `scripts/verifier-judge.js` | Quality Gate | 4-dimension quality check before storage |
-| **CLI** | `scripts/cli.js` | Interface | Command-line interface for memory operations |
-| **Setup** | `scripts/setup.js` | Installer | Initializes configuration and hooks |
+### 2.1 Stop Hook (session-end)
+
+**职责**：读取 transcript，提炼知识，写入 JSONL。
+
+| 字段 | 说明 |
+|------|------|
+| `timestamp` | ISO 8601 含时区 |
+| `author` | `"claude"` 或用户名 |
+| `session_id` | Claude Code session ID |
+| `content` | 知识内容（中文简洁）|
+| `tags` | 标签数组 |
+| `importance` | `high/medium/low` |
+
+### 2.2 SessionStart Hook (session-start)
+
+**职责**：读 JSONL → BM25 评分 → 注入 top-k 记忆到 session。
+
+**Relevance Scoring 策略**：
+
+| 字段 | 权重 |
+|------|------|
+| `topic` | 2.0 |
+| `tags` | 1.5 |
+| `summary` | 1.0 |
+| `details` | 0.5 |
+
+**注入格式**：
+
+```
+=== Team Memory (3 entries) ===
+[alice@2026-05-03] JWT refresh token gotcha
+Tags: auth, security, tokens
+Summary: Always rotate refresh tokens on use...
+Details: The old refresh token flow allowed reuse...
+---
+```
+
+### 2.3 Verifier-Judge (质量门控)
+
+**职责**：知识入库前裁判，deterministic JSONL processor。
+
+**拒绝规则**：safety=fail OR importance<2 OR relevance<2
 
 ---
 
-## Data Flow
+## 3. SessionStart 注入架构（gstack 模式）
 
-### Session End Flow
-
-```
-1. User types "exit" or closes terminal
-       │
-       ▼
-2. Stop Hook triggers automatically (registered in settings.json)
-       │
-       ▼
-3. hooks/stop-hook.js delegates to scripts/stop-hook.js
-       │
-       ▼
-4. Read transcript from ~/.claude/transcripts/<session_id>.jsonl
-       │
-       ▼
-5. LLM extracts key decisions/insights/patterns
-       │
-       ▼
-6. Send to Verifier Judge for quality check (completeness/relevance/reusability/clean)
-       │
-       ├─── PASS (score >= 60) ──► Append to ~/.myteambrain/memory/{user}/sessions/{date}-{session-id}.jsonl
-       │
-       └─── FAIL (score < 60) ───► Log rejected entry, discard
-       │
-       ▼
-7. Git Sync pushes to gitee + github remotes
-```
-
-### Session Start Flow
+参考 gstack"30 秒安装"模式，CLAUDE.md 注入机制：
 
 ```
-1. User runs "claude" command
-       │
-       ▼
-2. SessionStart Hook triggers automatically
-       │
-       ▼
-3. hooks/session-start-hook.js delegates to scripts/session-start-hook.js
-       │
-       ▼
-4. Read memories from ~/.myteambrain/memory/{user}/sessions/
-       │
-       ▼
-5. Build BM25-lite query tokens from cwd, git branch, recent files
-       │
-       ▼
-6. Score each memory by token overlap with IDF weighting
-       │
-       ▼
-7. Select top-K most relevant entries (default K=5)
-       │
-       ▼
-8. Inject as console output (visible in session)
-       │
-       ▼
-9. AI sees memories in context naturally
+GitHub repo → ~/.claude/skills/myteambrain/ → symlink → CLAUDE.md → Claude Code
 ```
 
 ---
 
-## Component Details
+## 4. 验收标准
 
-### Stop Hook (`hooks/stop-hook.js` + `scripts/stop-hook.js`)
-
-**Purpose**: Captures session knowledge on Claude Code exit.
-
-**Flow**:
-1. `hooks/stop-hook.js` — Entry point, registered in `settings.json` as "stop" hook
-2. Delegates to `scripts/stop-hook.js` — Core logic
-3. Reads transcript from `~/.claude/transcripts/`
-4. Extracts key decisions/learnings via LLM
-5. Runs quality check via `verifier-judge.js`
-6. Saves to `knowledge-store.js`
-7. Triggers `git-sync.js` on quality pass
-
-**Input**: Transcript file (`~/.claude/transcripts/current.jsonl`)
-
-**Output**: JSONL entry to `~/.myteambrain/memory/{username}/sessions/`
-
-**Key Features**:
-- Idempotent execution (safe to run multiple times)
-- Minimum turn threshold (skip short sessions)
-- Automatic git sync after extraction
-- Quality gate before storage
+| 组件 | 标准 |
+|------|------|
+| Stop hook | 6 字段完整，session 去重，PII scrubbing |
+| SessionStart | 2s 内完成，BM25 评分，topK 注入，minScore 过滤 |
+| Verifier-Judge | deterministic JSONL，rejection rules |
 
 ---
 
-### SessionStart Hook (`hooks/session-start-hook.js` + `scripts/session-start-hook.js`)
+## Detail（来源）
 
-**Purpose**: Injects relevant team memories at session start.
-
-**Input**: Reads from two sources:
-- `~/.myteambrain/knowledge/daily/` — markdown summaries from stop-hook
-- `~/.myteambrain/memory/{user}/sessions/` — JSONL entries from knowledge-store
-
-**Scoring Methods**:
-- BM25-lite: Token overlap with IDF weighting (default)
-- Keyword fallback: Simple token match when corpus < 50 docs
-
-**Output**: Console output with top-K relevant memories visible in session
-
----
-
-### Knowledge Store (`scripts/knowledge-store.js`)
-
-**Purpose**: Append-only JSONL storage for team knowledge. In-memory index + file system dual write.
-
-**Storage Path**: `~/.myteambrain/memory/{username}/sessions/{date}-{session-id}.jsonl`
-
-**Interface**:
-```javascript
-// Save session memory
-knowledgeStore.save({ username, sessionId, projectPath, content, tags, importance, timestamp })
-
-// Search memories
-knowledgeStore.search(query, { username, projectPath, startDate, endDate, tags, limit })
-
-// Get recent memories
-knowledgeStore.getRecent(username, days)
-
-// Get all memories for a project
-knowledgeStore.getByProject(projectPath)
-```
-
-**Features**:
-- Atomic writes (temp file + rename)
-- In-memory BM25-lite index for fast search
-- Per-user, per-session organization
-- Fuzzy search on content and tags
-
----
-
-### Git Sync (`scripts/git-sync.js`)
-
-**Purpose**: Synchronize knowledge across team machines.
-
-**Remotes**:
-- `gitee` — Primary (HPC/China network)
-- `github` — Secondary (global access)
-
-**Operations**:
-- On init: `git pull --ff-only`
-- After write: `git push gitee main && git push github main`
-- Conflict handling: Skip push if pull fails
-
----
-
-### Verifier Judge (`scripts/verifier-judge.js`)
-
-**Purpose**: Quality gate for knowledge entries. Third-party judge evaluates session memory quality across 4 dimensions.
-
-**Scoring Dimensions**:
-| Dimension | Range | Description |
-|-----------|-------|-------------|
-| completeness | 0-100 | Has meaningful task description, decisions, code changes |
-| relevance | 0-100 | Matches project/team keywords (hook, agent, skill, memory, etc.) |
-| reusability | 0-100 | Contains rationale others can learn from |
-| clean | 0-100 | No secrets, PII, debug noise, or stopping noise |
-
-**Garbage Patterns Rejected**:
-- Secrets/credentials (API keys, tokens, passwords, private keys)
-- PII (SSN patterns)
-- Debug noise (console.log, TODO, DEBUG flags)
-- Stopping noise (sessions with "just stopping" + <100 chars)
-
-**Pass Threshold**: total_score >= 60 (average of 4 dimensions)
-
-**Output**: JSON verdict with `{ exit_code, scores, total_score, pass, summary, reason }`
-
----
-
-## Extension Points
-
-### Custom Scoring Algorithms
-
-Extend `scripts/session-start-hook.js` scoring logic:
-
-```javascript
-// Current: BM25-lite in scoreMemory() function
-// To add custom: modify tokenize() and scoreMemory() functions
-```
-
-### Additional Hooks
-
-Hooks follow Claude Code hook registration format in `.claude/settings.json`:
-
-```json
-{
-  "hooks": {
-    "SessionStart": {
-      "command": "node /path/to/session-start-hook.js",
-      "context": "currentWorkingDirectory"
-    },
-    "Stop": {
-      "command": "node /path/to/stop-hook.js"
-    }
-  }
-}
-```
-
-### Knowledge Filters
-
-Extend `scripts/knowledge-store.js` save function:
-
-```javascript
-// Add pre-processing in save() function
-function save(sessionData) {
-  sessionData.content = scrubPII(sessionData.content);
-  sessionData.tags = filterTags(sessionData.tags);
-  // ... rest of implementation
-}
-```
-
-### Custom Verifier Judge Dimensions
-
-Extend `scripts/verifier-judge.js` scoring functions:
-
-```javascript
-// Add new dimension in judgeSession()
-function scoreCustomDimension(entry) {
-  // Implement custom scoring logic
-}
-```
-
----
-
-## File Inventory
-
-```
-myteambrain/
-├── hooks/
-│   ├── session-start-hook.js     # SessionStart hook entry point
-│   └── stop-hook.js              # Stop hook entry point
-├── scripts/
-│   ├── cli.js                    # CLI commands (init, status, memory)
-│   ├── setup.js                  # Init script + config generation
-│   ├── stop-hook.js              # Stop hook core logic
-│   ├── session-start-hook.js     # SessionStart hook core logic
-│   ├── knowledge-store.js        # JSONL storage module
-│   ├── git-sync.js               # Git sync module
-│   └── verifier-judge.js         # Quality gate
-├── docs/
-│   └── architecture.md           # This file
-├── README.md
-├── package.json
-└── setup.sh
-```
-
----
-
-## Security Considerations
-
-1. **No Secrets**: Verifier Judge rejects entries with API keys, tokens, private keys
-2. **PII Filtering**: Rejects entries with SSN patterns and other PII
-3. **Git Auth**: Uses SSH keys or token-based auth for gitee/github remotes
-4. **Local Storage**: Knowledge stored in `~/.myteambrain/` with user-only permissions
-5. **Quality Gate**: Low-quality or garbage entries rejected before storage
+- SessionStart SPEC：`docs/features/session-start-hook.md`
+- Stop Hook SPEC：`docs/features/stop-hook.md`
+- Knowledge Store：`docs/features/knowledge-store.md`
+- Verifier-Judge：`docs/features/verifier-judge.md`
+- 深度调研：`docs/research/team-ai-memory-research.md`
+- gstack 模式研究：`research-gstack.md`
+- /query 范围决定：`research-ceoplan.md`
+- Git commit：`f7ac297` — feat: add Claude Code hooks for session lifecycle management
