@@ -25,3 +25,4 @@
 - Each doc MUST have a index (in one sentence) -> Summary ( in <200 single .md doc ) -> Detail (a hyper-link to source , including local ~/.claude/**/*.jsonl raw chat session hashid , git commit hash id , and urls. 
 - If index is too large(>200 items), squeeze into N experts (each expert has its own index lists and one summary of expert itself and details of raw user input prompt and chat session transcript path ) 
 
+- NEVER work in main branch and ALWAYS use agent teams MORE ACTIVELY
