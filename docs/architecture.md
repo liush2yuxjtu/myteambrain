@@ -61,23 +61,26 @@
 1. User types "exit" or closes terminal
        │
        ▼
-2. Stop Hook triggers automatically
+2. Stop Hook triggers automatically (registered in settings.json)
        │
        ▼
-3. Read transcript from ~/.claude/transcripts/<session_id>.jsonl
+3. hooks/stop-hook.js delegates to scripts/stop-hook.js
        │
        ▼
-4. LLM extracts key decisions/insights/patterns
+4. Read transcript from ~/.claude/transcripts/<session_id>.jsonl
        │
        ▼
-5. Send to Verifier Judge for quality check
-       │
-       ├─── PASS ───► Append to ~/.myteambrain/knowledge/{YYYY-MM}.jsonl
-       │
-       └─── FAIL ───► Log rejected entry, discard
+5. LLM extracts key decisions/insights/patterns
        │
        ▼
-6. Git Sync pushes to gitee + github remotes
+6. Send to Verifier Judge for quality check (completeness/relevance/reusability/clean)
+       │
+       ├─── PASS (score >= 60) ──► Append to ~/.myteambrain/memory/{user}/sessions/{date}-{session-id}.jsonl
+       │
+       └─── FAIL (score < 60) ───► Log rejected entry, discard
+       │
+       ▼
+7. Git Sync pushes to gitee + github remotes
 ```
 
 ### Session Start Flow
@@ -89,22 +92,25 @@
 2. SessionStart Hook triggers automatically
        │
        ▼
-3. Read all JSONL files from ~/.myteambrain/knowledge/
+3. hooks/session-start-hook.js delegates to scripts/session-start-hook.js
        │
        ▼
-4. Score memories using BM25 relevance algorithm
+4. Read memories from ~/.myteambrain/memory/{user}/sessions/
        │
        ▼
-5. Filter by minScore threshold
+5. Build BM25-lite query tokens from cwd, git branch, recent files
        │
        ▼
-6. Select top-K most relevant entries
+6. Score each memory by token overlap with IDF weighting
        │
        ▼
-7. Inject as console output (visible in session)
+7. Select top-K most relevant entries (default K=5)
        │
        ▼
-8. AI sees memories in context naturally
+8. Inject as console output (visible in session)
+       │
+       ▼
+9. AI sees memories in context naturally
 ```
 
 ---
@@ -222,22 +228,18 @@ knowledgeStore.getByProject(projectPath)
 
 ## Extension Points
 
-### Custom Scoring
+### Custom Scoring Algorithms
 
-Implement custom scorer in `scripts/session-start-hook.js`:
+Extend `scripts/session-start-hook.js` scoring logic:
 
 ```javascript
-// Add new scorer
-const scorers = {
-  bm25: BM25Scorer,
-  keyword: KeywordScorer,
-  custom: CustomScorer  // Your implementation
-};
+// Current: BM25-lite in scoreMemory() function
+// To add custom: modify tokenize() and scoreMemory() functions
 ```
 
 ### Additional Hooks
 
-Hooks follow Claude Code hook registration format:
+Hooks follow Claude Code hook registration format in `.claude/settings.json`:
 
 ```json
 {
@@ -245,6 +247,9 @@ Hooks follow Claude Code hook registration format:
     "SessionStart": {
       "command": "node /path/to/session-start-hook.js",
       "context": "currentWorkingDirectory"
+    },
+    "Stop": {
+      "command": "node /path/to/stop-hook.js"
     }
   }
 }
@@ -252,13 +257,25 @@ Hooks follow Claude Code hook registration format:
 
 ### Knowledge Filters
 
-Add pre-processing filters in knowledge-store.js:
+Extend `scripts/knowledge-store.js` save function:
 
 ```javascript
-// Example: Add PII scrubbing
-async function appendKnowledge(options) {
-  options.content = scrubPII(options.content);
+// Add pre-processing in save() function
+function save(sessionData) {
+  sessionData.content = scrubPII(sessionData.content);
+  sessionData.tags = filterTags(sessionData.tags);
   // ... rest of implementation
+}
+```
+
+### Custom Verifier Judge Dimensions
+
+Extend `scripts/verifier-judge.js` scoring functions:
+
+```javascript
+// Add new dimension in judgeSession()
+function scoreCustomDimension(entry) {
+  // Implement custom scoring logic
 }
 ```
 
