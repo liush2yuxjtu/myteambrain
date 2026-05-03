@@ -276,23 +276,30 @@ function main() {
     return;
   }
 
-  // Inject memories via stdout
-  const lines = [];
-  lines.push('');
-  lines.push('=== Team Memory (' + topK.length + ' relevant) ===');
-  lines.push('');
+  // Inject memories via stdout using hookSpecificOutput JSON format
+  // Claude Code recognizes this format and injects additionalContext into session
+  const memoryContent = [];
+  memoryContent.push('=== Team Memory (' + topK.length + ' relevant) ===');
+  memoryContent.push('');
 
   for (const item of topK) {
     const m = item.memory;
     injectedIds.add(m.id);
-    lines.push(formatMemory(m));
-    lines.push('');
+    memoryContent.push(formatMemory(m));
+    memoryContent.push('');
   }
 
-  lines.push('==========================');
-  lines.push('');
+  memoryContent.push('==========================');
 
-  console.log(lines.join('\n'));
+  // Output as JSON for Claude Code hookSpecificOutput mechanism
+  const output = {
+    hookSpecificOutput: {
+      hookEventName: 'SessionStart',
+      additionalContext: memoryContent.join('\n')
+    }
+  };
+
+  console.log(JSON.stringify(output));
 }
 
 // Always exit 0 — never block session start

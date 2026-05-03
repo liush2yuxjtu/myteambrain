@@ -149,7 +149,16 @@ async function injectKnowledge() {
   // Inject into CLAUDE.md (gstack pattern)
   injectCLAUDEmd(projectDir, memories);
 
-  log('Context injected via CLAUDE.md');
+  // Also output via hookSpecificOutput for Claude Code to inject
+  const output = {
+    hookSpecificOutput: {
+      hookEventName: 'SessionStart',
+      additionalContext: `MyTeamBrain memories injected into CLAUDE.md (${memories.length} items)`
+    }
+  };
+  console.log(JSON.stringify(output));
+
+  log('Context injected via CLAUDE.md and hookSpecificOutput');
 }
 
 function outputNoContext() {
